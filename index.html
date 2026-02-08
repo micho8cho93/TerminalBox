@@ -314,6 +314,8 @@
         let timerStart = 0;
         let outputTruncated = false;
         let drainingOutput = false; // When true, discard output until we see a prompt
+        let mountProbeState = 'idle';
+        let mountProbeBuffer = '';
         // Prompt pattern - match various shell prompts (ash/sh: "$ ", csh/tcsh: "% ", root: "# ")
         const promptPattern = /[$%#>]\s*$/;
         const maxOutputSize = 50000; // Truncate output after 50KB
@@ -444,6 +446,28 @@
             updateStatus('booting', 'Loading emulator...');
 
             try {
+                // Fast preflight check for local image availability.
+                // If this fails, the page is often opened via file:// instead of HTTP.
+                let diskImageReachable = false;
+                try {
+                    const headResp = await fetch('ctf-basic.img', { method: 'HEAD', cache: 'no-store' });
+                    diskImageReachable = headResp.ok || headResp.status === 405;
+                } catch (e) {
+                    diskImageReachable = false;
+                }
+
+                if (!diskImageReachable) {
+                    updateStatus('', 'Disk image unavailable');
+                    setOutput(
+                        'Could not load ctf-basic.img before boot.\n\n' +
+                        'Use a local web server instead of opening index.html directly.\n' +
+                        'Example:\n' +
+                        'python3 -m http.server 8000\n' +
+                        'Then open http://localhost:8000\n'
+                    );
+                    return;
+                }
+
                 emulator = new V86({
                     wasm_path: 'https://cdn.jsdelivr.net/npm/v86@latest/build/v86.wasm',
                     memory_size: 64 * 1024 * 1024,
@@ -490,6 +514,37 @@
                     }
 
                     outputBuffer += char;
+
+                    // Parse automatic mount probe markers emitted during boot.
+                    if (mountProbeState === 'pending') {
+                        mountProbeBuffer += char;
+                        if (mountProbeBuffer.length > 4096) {
+                            mountProbeBuffer = mountProbeBuffer.slice(-4096);
+                        }
+
+                        const okMatch = mountProbeBuffer.match(/__CTF_MOUNT_OK__:([^\s:]+):([^\s:]+)/);
+                        if (okMatch) {
+                            mountProbeState = 'ok';
+                            const dev = okMatch[1];
+                            const fstype = okMatch[2];
+                            setOutput(
+                                'Linux booted successfully. Enter a command above.\n\n' +
+                                'Your custom disk is mounted at /mnt/ctf (read-only).\n' +
+                                `Detected device: ${dev} (${fstype})\n` +
+                                'Try: ls /mnt/ctf\n\n'
+                            );
+                        } else if (mountProbeBuffer.includes('__CTF_MOUNT_FAIL__')) {
+                            mountProbeState = 'failed';
+                            setOutput(
+                                'Linux booted, but the custom disk was not mounted.\n\n' +
+                                'Checks:\n' +
+                                '1) Ensure you are serving this project over HTTP (not file://)\n' +
+                                '2) Run: cat /proc/partitions\n' +
+                                '3) Run: ls /dev | grep -E "^[shv]d[a-z]"\n' +
+                                '4) Run: mount\n\n'
+                            );
+                        }
+                    }
 
                     if (waitingForOutput) {
                         // Check for output truncation
@@ -544,11 +599,42 @@
                         runBtn.disabled = false;
 
                         // Auto-mount the custom disk to a stable location for users.
-                        // Try partition and raw-device mounts; include explicit vfat fallback.
-                        emulator.serial0_send('mkdir -p /mnt/ctf\n');
-                        emulator.serial0_send('(mount -o ro /dev/sda1 /mnt/ctf 2>/dev/null || mount -o ro /dev/sda /mnt/ctf 2>/dev/null || mount -t vfat -o ro /dev/sda1 /mnt/ctf 2>/dev/null || mount -t vfat -o ro /dev/sda /mnt/ctf 2>/dev/null)\n');
+                        // Probe common block device families used by v86 builds.
+                        const autoMountProbe = `
+mkdir -p /mnt/ctf;
+umount /mnt/ctf >/dev/null 2>&1 || true;
+CTF_OK=0;
+for DEV in /dev/sd[a-z][0-9] /dev/sd[a-z] /dev/hd[a-z][0-9] /dev/hd[a-z] /dev/vd[a-z][0-9] /dev/vd[a-z] /dev/xvd[a-z][0-9] /dev/xvd[a-z]; do
+  [ -b "$DEV" ] || continue;
+  for FS in auto vfat msdos ext4 ext3 ext2; do
+    if [ "$FS" = auto ]; then
+      mount -o ro "$DEV" /mnt/ctf 2>/dev/null;
+    else
+      mount -t "$FS" -o ro "$DEV" /mnt/ctf 2>/dev/null;
+    fi;
+    if [ $? -eq 0 ]; then
+      if [ -f /mnt/ctf/HINTS.txt ] || [ -d /mnt/ctf/code ] || [ -d /mnt/ctf/documents ]; then
+        echo __CTF_MOUNT_OK__:$DEV:$FS;
+        CTF_OK=1;
+        break 2;
+      fi;
+      umount /mnt/ctf >/dev/null 2>&1 || true;
+    fi;
+  done;
+done;
+if [ "$CTF_OK" -ne 1 ]; then
+  echo __CTF_MOUNT_FAIL__;
+fi;
+`;
 
-                        setOutput('Linux booted successfully. Enter a command above.\n\nYour custom disk is available at /mnt/ctf (read-only).\nTry: ls /mnt/ctf\n\n');
+                        mountProbeState = 'pending';
+                        mountProbeBuffer = '';
+                        emulator.serial0_send(autoMountProbe + '\n');
+
+                        setOutput(
+                            'Linux booted successfully. Enter a command above.\n\n' +
+                            'Attempting to mount your custom disk at /mnt/ctf...\n'
+                        );
                         commandInput.focus();
                     }
                 });
