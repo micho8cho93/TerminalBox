@@ -82,6 +82,16 @@ Then visit: `http://localhost:8000`
 
 **Important**: Opening `index.html` directly in your browser (using `file://` protocol) will prevent CTF challenges from loading due to browser security restrictions (CORS policy). You must use a local web server.
 
+### Rebuild the `ctf-basic.img` data disk
+
+When you update files under `ctf-collection/ctf_basic`, regenerate the mounted data disk:
+
+```bash
+./scripts/build-ctf-basic-image.sh
+```
+
+This recreates `ctf-basic.img` (and `ctf-basic.dmg`) from `ctf-collection/ctf_basic`.
+
 ## 🛠️ Repository Structure
 
 ```
