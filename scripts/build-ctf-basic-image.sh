@@ -7,20 +7,20 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SOURCE_DIR="${1:-${ROOT_DIR}/ctf-collection/ctf_basic}"
 OUTPUT_IMG="${2:-${ROOT_DIR}/ctf-basic.img}"
 OUTPUT_DMG="${3:-${ROOT_DIR}/ctf-basic.dmg}"
-VOLUME_NAME="${CTF_VOLUME_NAME:-CTF_BASIC}"
+GENEXT2FS_VERSION="${GENEXT2FS_VERSION:-1.4.2-0}"
 
 if [[ ! -d "${SOURCE_DIR}" ]]; then
     echo "Source directory not found: ${SOURCE_DIR}" >&2
     exit 1
 fi
 
-if ! command -v hdiutil >/dev/null 2>&1; then
-    echo "hdiutil is required but not available." >&2
+if ! command -v npm >/dev/null 2>&1; then
+    echo "npm is required but not available." >&2
     exit 1
 fi
 
-if [[ ! -x /sbin/newfs_msdos ]]; then
-    echo "/sbin/newfs_msdos is required but not available." >&2
+if ! command -v cc >/dev/null 2>&1; then
+    echo "C compiler (cc) is required but not available." >&2
     exit 1
 fi
 
@@ -30,62 +30,62 @@ if ! command -v rsync >/dev/null 2>&1; then
 fi
 
 source_kib="$(du -sk "${SOURCE_DIR}" | awk '{print $1}')"
-image_mib="$(( (source_kib + 4096 + 1023) / 1024 ))"
-if (( image_mib < 12 )); then
-    image_mib=12
+image_blocks="$((source_kib + 4096))"
+if (( image_blocks < 12288 )); then
+    image_blocks=12288
 fi
+image_mib="$(( (image_blocks + 1023) / 1024 ))"
 
-tmp_base="$(mktemp "${TMPDIR:-/tmp}/ctf-basic.XXXXXX")"
-tmp_img="${tmp_base}.img"
-rm -f "${tmp_base}"
-
-raw_device=""
-mounted_device=""
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/ctf-basic-build.XXXXXX")"
+tmp_src="${tmp_dir}/src"
+tmp_img="${tmp_dir}/ctf-basic.img"
+genext2fs_dir="${tmp_dir}/genext2fs"
 
 cleanup() {
     set +e
-    if [[ -n "${mounted_device}" ]]; then
-        hdiutil detach "${mounted_device}" >/dev/null 2>&1 || true
-    fi
-    if [[ -n "${raw_device}" ]]; then
-        hdiutil detach "${raw_device}" >/dev/null 2>&1 || true
-    fi
-    rm -f "${tmp_img}"
+    rm -rf "${tmp_dir}"
 }
 trap cleanup EXIT
 
-dd if=/dev/zero of="${tmp_img}" bs=1m count="${image_mib}" status=none
+mkdir -p "${tmp_src}" "${genext2fs_dir}"
 
-raw_device="$(hdiutil attach -nomount "${tmp_img}" | awk 'NR==1{print $1}')"
-if [[ -z "${raw_device}" ]]; then
-    echo "Failed to attach temporary image for formatting." >&2
-    exit 1
-fi
-
-/sbin/newfs_msdos -F 16 -v "${VOLUME_NAME}" "${raw_device/disk/rdisk}" >/dev/null
-hdiutil detach "${raw_device}" >/dev/null
-raw_device=""
-
-attach_output="$(hdiutil attach -readwrite -nobrowse "${tmp_img}")"
-mounted_device="$(printf '%s\n' "${attach_output}" | awk 'NR==1{print $1}')"
-mount_point="$(printf '%s\n' "${attach_output}" | awk -F '\t' 'NR==1{print $NF}' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-
-if [[ -z "${mounted_device}" || -z "${mount_point}" || ! -d "${mount_point}" ]]; then
-    echo "Failed to mount temporary image after formatting." >&2
-    exit 1
-fi
-
-# COPYFILE_DISABLE avoids AppleDouble (._*) sidecar files on non-HFS volumes.
-COPYFILE_DISABLE=1 rsync -a --delete \
+# Copy source tree and strip host-specific metadata files.
+rsync -a --delete \
     --exclude='.DS_Store' \
     --exclude='._*' \
-    "${SOURCE_DIR}/" "${mount_point}/"
+    "${SOURCE_DIR}/" "${tmp_src}/"
 
-# macOS may still synthesize AppleDouble files on FAT volumes; remove them.
-find "${mount_point}" -type f \( -name '._*' -o -name '.DS_Store' \) -delete
-
-hdiutil detach "${mounted_device}" >/dev/null
-mounted_device=""
+(
+    cd "${genext2fs_dir}"
+    npm pack "genext2fs@${GENEXT2FS_VERSION}" >/dev/null
+    tar -xf genext2fs-*.tgz
+    cd package
+    cat > config.h <<'EOF'
+#define VERSION "1.4.2"
+#define STDC_HEADERS 1
+#define HAVE_SYS_TYPES_H 1
+#define HAVE_SYS_STAT_H 1
+#define HAVE_STDLIB_H 1
+#define HAVE_STDDEF_H 1
+#define HAVE_STRING_H 1
+#define HAVE_MEMORY_H 1
+#define HAVE_STRINGS_H 1
+#define HAVE_INTTYPES_H 1
+#define HAVE_STDINT_H 1
+#define HAVE_UNISTD_H 1
+#define HAVE_DIRENT_H 1
+#define HAVE_LIBGEN_H 1
+#define HAVE_FCNTL_H 1
+#define HAVE_GETOPT_H 1
+#define HAVE_LIMITS_H 1
+#define HAVE_GETLINE 1
+#define HAVE_STRTOF 1
+#define HAVE_STRUCT_STAT_ST_RDEV 1
+#define HAVE_GETOPT_LONG 1
+EOF
+    cc -I. -std=gnu89 -O2 genext2fs.c -o genext2fs_local
+    ./genext2fs_local -d "${tmp_src}" -b "${image_blocks}" "${tmp_img}"
+)
 
 mkdir -p "$(dirname "${OUTPUT_IMG}")"
 mv "${tmp_img}" "${OUTPUT_IMG}"

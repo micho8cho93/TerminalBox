@@ -287,7 +287,7 @@
         <a href="https://github.com/copy/v86" target="_blank">v86</a>, an x86 emulator written in JavaScript/WebAssembly.
         Boot time is typically 10-30 seconds depending on your connection and device.
         <br><br>
-        <strong>Note:</strong> This version boots from the Buildroot kernel and mounts ctf-basic.img (FAT data disk) at <code>/mnt/ctf</code>.
+        <strong>Note:</strong> This version boots from the Buildroot kernel and mounts ctf-basic.img (ext2 data disk) at <code>/mnt/ctf</code>.
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/v86@latest/build/libv86.js"></script>
@@ -522,7 +522,7 @@
                             mountProbeBuffer = mountProbeBuffer.slice(-4096);
                         }
 
-                        const okMatch = mountProbeBuffer.match(/__CTF_MOUNT_OK__:([^\s:]+):([^\s:]+)/);
+                        const okMatch = mountProbeBuffer.match(/(?:^|\n)__CTF_MOUNT_OK__:(\/dev\/[a-z0-9._/-]+):(auto|vfat|msdos|ext4|ext3|ext2)(?:\r?\n|$)/);
                         if (okMatch) {
                             mountProbeState = 'ok';
                             const dev = okMatch[1];
@@ -533,7 +533,7 @@
                                 `Detected device: ${dev} (${fstype})\n` +
                                 'Try: ls /mnt/ctf\n\n'
                             );
-                        } else if (mountProbeBuffer.includes('__CTF_MOUNT_FAIL__')) {
+                        } else if (/(?:^|\n)__CTF_MOUNT_FAIL__(?:\r?\n|$)/.test(mountProbeBuffer)) {
                             mountProbeState = 'failed';
                             setOutput(
                                 'Linux booted, but the custom disk was not mounted.\n\n' +
@@ -604,23 +604,27 @@
 mkdir -p /mnt/ctf;
 umount /mnt/ctf >/dev/null 2>&1 || true;
 CTF_OK=0;
-for DEV in /dev/sd[a-z][0-9] /dev/sd[a-z] /dev/hd[a-z][0-9] /dev/hd[a-z] /dev/vd[a-z][0-9] /dev/vd[a-z] /dev/xvd[a-z][0-9] /dev/xvd[a-z]; do
-  [ -b "$DEV" ] || continue;
-  for FS in auto vfat msdos ext4 ext3 ext2; do
-    if [ "$FS" = auto ]; then
-      mount -o ro "$DEV" /mnt/ctf 2>/dev/null;
-    else
-      mount -t "$FS" -o ro "$DEV" /mnt/ctf 2>/dev/null;
-    fi;
-    if [ $? -eq 0 ]; then
-      if [ -f /mnt/ctf/HINTS.txt ] || [ -d /mnt/ctf/code ] || [ -d /mnt/ctf/documents ]; then
-        echo __CTF_MOUNT_OK__:$DEV:$FS;
-        CTF_OK=1;
-        break 2;
+for TRY in 1 2 3 4 5 6 7 8; do
+  for DEV in /dev/sd[a-z][0-9] /dev/sd[a-z] /dev/hd[a-z][0-9] /dev/hd[a-z] /dev/vd[a-z][0-9] /dev/vd[a-z] /dev/xvd[a-z][0-9] /dev/xvd[a-z]; do
+    [ -b "$DEV" ] || continue;
+    for FS in auto vfat msdos ext4 ext3 ext2; do
+      if [ "$FS" = auto ]; then
+        mount -o ro "$DEV" /mnt/ctf 2>/dev/null;
+      else
+        mount -t "$FS" -o ro "$DEV" /mnt/ctf 2>/dev/null;
       fi;
-      umount /mnt/ctf >/dev/null 2>&1 || true;
-    fi;
+      if [ $? -eq 0 ]; then
+        if [ -f /mnt/ctf/HINTS.txt ] || [ -d /mnt/ctf/code ] || [ -d /mnt/ctf/documents ]; then
+          echo __CTF_MOUNT_OK__:$DEV:$FS;
+          CTF_OK=1;
+          break 3;
+        fi;
+        umount /mnt/ctf >/dev/null 2>&1 || true;
+      fi;
+    done;
   done;
+  [ "$CTF_OK" -eq 1 ] && break;
+  sleep 1;
 done;
 if [ "$CTF_OK" -ne 1 ]; then
   echo __CTF_MOUNT_FAIL__;

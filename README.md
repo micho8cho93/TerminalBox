@@ -90,7 +90,7 @@ When you update files under `ctf-collection/ctf_basic`, regenerate the mounted d
 ./scripts/build-ctf-basic-image.sh
 ```
 
-This recreates `ctf-basic.img` (and `ctf-basic.dmg`) from `ctf-collection/ctf_basic`.
+This recreates `ctf-basic.img` (ext2) and `ctf-basic.dmg` from `ctf-collection/ctf_basic`.
 
 ## 🛠️ Repository Structure
 
